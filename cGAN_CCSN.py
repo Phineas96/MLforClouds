@@ -13,10 +13,10 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 from IPython import display
 import h5py
-#import ray
+import ray
 
 from keras import layers
-#from keras.datasets import mnist
+from keras.datasets import mnist
 from keras.utils import to_categorical
 
 '''
