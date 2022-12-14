@@ -28,8 +28,14 @@ from keras.datasets import mnist
 from keras.utils import to_categorical
 
 '''
-relu als activation auch in Convolutional layers soll Training beschleunigen laut Krizhevsky2017
+relu als activation auch in Convolutional layers soll Training beschleunigen laut Krizhevsky2012
 '''
+
+#os.environ["OMP_NUM_THREADS"] = '15'
+
+tf.config.threading.set_intra_op_parallelism_threads(num_threads = 10)
+
+tf.config.threading.set_inter_op_parallelism_threads(1)
 
 # Funktion die den Generator, i.e. den Artist, erstellt
 def make_generator_model():
@@ -41,12 +47,12 @@ def make_generator_model():
     # model.add(layers.Reshape((7, 7, 256)))
     #assert model.output_shape == (None, 7, 7, 256)  # Note: None is the batch size
 
-    model.add(layers.Conv2DTranspose(128, (5, 5), strides=(1, 1), padding='same', use_bias=False, input_shape = [7,7,256]))
+    model.add(layers.Conv2DTranspose(128, (5, 5), strides=(1, 1), padding='same', use_bias=False, activation = 'relu', input_shape = [7,7,256]))
     assert model.output_shape == (None, 7, 7, 128)
     model.add(layers.BatchNormalization())
     model.add(layers.LeakyReLU())
 
-    model.add(layers.Conv2DTranspose(64, (5, 5), strides=(2, 2), padding='same', use_bias=False))
+    model.add(layers.Conv2DTranspose(64, (5, 5), strides=(2, 2), padding='same', use_bias=False, activation = 'relu'))
     assert model.output_shape == (None, 14, 14, 64)
     model.add(layers.BatchNormalization())
     model.add(layers.LeakyReLU())
@@ -61,12 +67,12 @@ def make_generator_model():
 # Output des Diskriminators ist <0 wenn fake image und >0 wenn real image
 def make_discriminator_model():
     model = tf.keras.Sequential()
-    model.add(layers.Conv2D(64, (5, 5), strides=(2, 2), padding='same',
+    model.add(layers.Conv2D(64, (5, 5), strides=(2, 2), padding='same', activation = 'relu',
                                      input_shape=[28, 28, 1]))
     model.add(layers.LeakyReLU())
     model.add(layers.Dropout(0.3))
 
-    model.add(layers.Conv2D(128, (5, 5), strides=(2, 2), padding='same'))
+    model.add(layers.Conv2D(128, (5, 5), strides=(2, 2), padding='same', activation = 'relu'))
     model.add(layers.LeakyReLU())
     model.add(layers.Dropout(0.3))
 
@@ -141,7 +147,7 @@ def train_step(images, real_labels, noise, fake_labels, wgt):
     return gen_loss, disc_loss
 
 #@tf.function
-def train_step_labels(images, real_labels, noise, fake_labels, epoch, batch_counter, thresh_prob = 0.7, thresh_quant = 0.2):
+def train_step_labels(images, real_labels, noise, fake_labels, epoch, batch_counter):
     
     with tf.GradientTape() as gen_tape, tf.GradientTape() as disc_tape:
         generated_images = generator(noise, training=True)
@@ -155,30 +161,38 @@ def train_step_labels(images, real_labels, noise, fake_labels, epoch, batch_coun
         # real_classes_true = np.argmax(real_labels_true, axis = 1)
         # real_classes_pred = np.argmax(real_labels_pred, axis = 1)
         
-        log_file_misc.write(str(epoch) + ',' + str(batch_counter) + ',' + 
-                            str((np.argmax(real_labels, axis = 1) == np.argmax(real_labels_pred, axis = 1)).sum()/BATCH_SIZE) + ',' + str(np.max(real_labels_pred)) + ',' + 
-                            str((np.argmax(fake_labels, axis = 1) == np.argmax(fake_labels_pred, axis = 1)).sum()/BATCH_SIZE) + ',' + str(np.max(fake_labels_pred)) + '\n')
+        real_rat_correct = (np.argmax(real_labels, axis = 1) == np.argmax(real_labels_pred, axis = 1)).sum()/BATCH_SIZE
+        real_pmax = np.max(real_labels_pred)
 
+        fake_rat_correct = (np.argmax(fake_labels, axis = 1) == np.argmax(fake_labels_pred, axis = 1)).sum()/BATCH_SIZE
+        fake_pmax = np.max(fake_labels_pred)
+
+        log_file_misc.write(str(epoch) + ',' + str(batch_counter) + ',' + 
+                            str(real_rat_correct) + ',' + str(real_pmax) + ',' + 
+                            str(fake_rat_correct) + ',' + str(fake_pmax) + '\n')
+    
         # Real Input data
-        if (np.argmax(real_labels, axis = 1) == np.argmax(real_labels_pred, axis = 1)).sum()/BATCH_SIZE > thresh_quant and np.max(real_labels_pred) > thresh_prob:
+        if  real_rat_correct > thresh_quant and  real_pmax > thresh_prob:
             real_loss = cross_entropy(y_true = real_labels, y_pred = real_labels_pred)
         else:
             real_loss = 2*cross_entropy(y_true = real_labels, y_pred = real_labels_pred)
         
         # Fake Input data
-        if (np.argmax(fake_labels, axis = 1) == np.argmax(fake_labels_pred, axis = 1)).sum()/BATCH_SIZE > thresh_quant and np.max(fake_labels_pred) > thresh_prob:
+        if fake_rat_correct > thresh_quant and fake_pmax > thresh_prob:
             fake_loss = cross_entropy(y_true = fake_labels, y_pred = fake_labels_pred)
         else:
             fake_loss = 2*cross_entropy(y_true = fake_labels, y_pred = fake_labels_pred)
+            
     
         disc_loss = real_loss + fake_loss
         gen_loss = fake_loss
     
     gradients_of_generator = gen_tape.gradient(gen_loss, generator.trainable_variables)
     generator_optimizer.apply_gradients(zip(gradients_of_generator, generator.trainable_variables))
-        
+            
     gradients_of_discriminator = disc_tape.gradient(disc_loss, discriminator.trainable_variables)
     discriminator_optimizer.apply_gradients(zip(gradients_of_discriminator, discriminator.trainable_variables))
+
 
     return gen_loss, disc_loss
 
@@ -227,6 +241,8 @@ def train(dataset, labels, epochs):
         # Save the model every 15 epochs
         if (epoch + 1) % 15 == 0:
             checkpoint.save(file_prefix = checkpoint_prefix)
+            # generator.save(os.path.join(checkpoint_dir, 'generator_{:04d}epochs'.format(epoch+1)))
+            # discriminator.save(os.path.join(checkpoint_dir, 'discriminator_{:04d}epochs'.format(epoch+1)))
         
         print ('Time for epoch {} is {} sec'.format(epoch + 1, time.time()-start))
         print('G loss bool = ', gen_loss.numpy())
@@ -238,9 +254,17 @@ def train(dataset, labels, epochs):
                               epochs,
                               seed)
     
+    
+    # model.save speichert das fertige Modell ab, die Resultate sind ident.
+    # checkpoint.save specihert checkpoints, wie das mit dem restore ist muss ich mir erst ansehen
+    
     # save final model
     checkpoint.save(file_prefix = checkpoint_prefix)
     
+    # save it again
+    generator.save(os.path.join(checkpoint_dir, 'generator_{:04d}epochs'.format(epochs)))
+    discriminator.save(os.path.join(checkpoint_dir, 'discriminator_{:04d}epochs'.format(epochs)))
+
     
 def validation(epoch):
     
@@ -303,17 +327,22 @@ train_real_acc = tf.keras.metrics.CategoricalAccuracy()
 train_fake_acc = tf.keras.metrics.CategoricalAccuracy()
 val_acc = tf.keras.metrics.CategoricalAccuracy()
 
-checkpoint_dir = '/jetfs/home/mrosenberger/CNNPictures/MNIST/cGAN5'
+home_dir = '/mnt/users/staff/mrosenberger' # am jet01: '/jetfs/home/mrosenberger'
+checkpoint_dir = os.path.join(home_dir, 'CNNPictures/MNIST/cGAN5')
 checkpoint_prefix = os.path.join(checkpoint_dir, "ckpt")
 checkpoint = tf.train.Checkpoint(generator_optimizer=generator_optimizer,
                                  discriminator_optimizer=discriminator_optimizer,
                                  generator=generator,
                                  discriminator=discriminator)
 
+
 # Details des Trainingsprozesses
-EPOCHS = 100
+EPOCHS = 50
 noise_dim = 100
 num_examples_to_generate = 16
+
+thresh_prob = tf.constant(0.7) 
+thresh_quant = tf.constant(0.2)
 
 
 # You will reuse this seed overtime (so it's easier)
@@ -372,336 +401,94 @@ log_file_val.close()
 log_file_misc.close()
 log_file_trainacc.close()
 #display_image(EPOCHS)
-#%%
-''' 
-Werte sollen z.B. zwischen 0.2 und 1 sein und abhängig von der Epoche zunehmen
-'''
-# epochs = 10
-# wgt_lin = []
-# wgt_log = []
-# wgt_exp = []
-# wgt_sig = []
-# for i in range(epochs):
-#     wgt_lin.append(1- 0.8*i/(epochs-1))
-#     wgt_log.append(1 - 0.8*np.log(i/(epochs-1)))
-#     wgt_exp.append(1 - 0.8*np.exp(i/(epochs-1)))
-#     wgt_sig.append(1 - 0.8*1/(1+np.exp(-i/(epochs-1))))
-
-
-
-# plt.plot(np.array(wgt_lin), label = 'linear')
-# plt.plot(np.array(wgt_exp), label = 'exp')
-# plt.plot(np.array(wgt_sig), label = 'sigmoid')
-# plt.plot(wgt_log, label = 'log')
-# plt.legend()
-# plt.show()
-
-#%%
-# BATCH_SIZE = 200
-# noise = seed
-# images = train_dataset[0][:BATCH_SIZE]
-# real_labels_true = to_categorical(train_labels[0][:BATCH_SIZE], num_classes = 10)
-# thresh_prob = 0.7
-
-# generated_images = generator(noise)
-        
-# real_output = discriminator(images)
-# fake_output = discriminator(generated_images)
-
-# real_labels_pred = real_output[:,:-1]
-# fake_labels_pred = fake_output[:,:-1]
-
-# start1 = time.time()
-# real_loss = []
-# for true, pred in zip(real_labels_true, real_labels_pred):
-#     if np.argmax(true)==np.argmax(pred) and np.max(pred)>thresh_prob:
-#         real_loss.append(cross_entropy(y_true = true, y_pred = pred))
-#     else:
-#         real_loss.append(2*cross_entropy(y_true = true, y_pred = pred))
-        
-# fake_loss = []
-# for true, pred in zip(fake_labels, fake_labels_pred):
-#     if np.argmax(true)==np.argmax(pred) and np.max(pred)>thresh_prob:
-#         fake_loss.append(cross_entropy(y_true = true, y_pred = pred))
-#     else:
-#         fake_loss.append(2*cross_entropy(y_true = true, y_pred = pred))
-
-# disc_loss = tf.math.reduce_mean(real_loss) + tf.math.reduce_mean(fake_loss)
-# gen_loss = tf.math.reduce_mean(fake_loss)
-
-# print(time.time()-start1)
-
-# start2 = time.time()
-# real_loss_fast = cross_entropy(y_true = real_labels_true, y_pred = real_labels_pred)
-
-# p_corrlabel = (np.argmax(real_labels_true, axis = 1) == np.argmax(real_labels_pred, axis = 1)).sum()/BATCH_SIZE
-# p_highprob = (np.max(real_labels_pred, axis = 1)>thresh_prob).sum()/BATCH_SIZE
-
-# real_loss_fast2 = real_loss_fast * (2-np.mean([p_corrlabel, p_highprob]))
-# print(time.time()-start2)
-
-# '''
-# Alles richtig mit hoher prob -> niedriger loss:
-#     p_ref = 1 -> loss = 1
-
-# Nichts richtig oder niedrige prob -> höherer loss:
-#     p_ref = 0 -> loss = 2
-# '''
-
-
-#%%
 # Laden des zuletzt gespeicherten Modells im Ordner
 # checkpoint.restore(tf.train.latest_checkpoint(checkpoint_dir))
 
-#%%
-# falls ich nochmal trainieren will
-# EPOCHS = 30
-
-# log_dir= os.path.join(checkpoint_dir, 'logs')
-
-# log_file = open(os.path.join(log_dir, 'loss_log.txt'), 'a')
-
-# train(train_dataset, train_labels, EPOCHS)
-
-# log_file.close()
 
 #%%
-# EPOCHS = 2
-# ray.init(num_cpus = 2)
-# train.remote(train_dataset, train_labels, EPOCHS)
-
-# ray.shutdown()
-#%%
-# kind = 'miscvalues'
-# filestring = kind + '_log.txt'
-# picstring1 = kind + '_plot_Ratcorrectlabels.png'
-# picstring2 = kind + '_plot_labelpmax.png'
-
-# with open(os.path.join(log_dir, filestring), 'r') as f:
-#     reopen = []
-#     f.readline() # skip header line
-#     for line in f:
-#         reopen.append([float(i) for i in line.split(',')[1:]])
-
-#         # Falls man mal nicht weiß wie viele Headerlines es sind. Sind dann aber leeren Listen an den Headerpositionen,
-#         # da gibts sicher einen netten workaround
-#         # try:
-#         #     b.append([float(i) for i in line.split(',')[2:]])
-#         # except:
-#         #     continue
-    
-# reopen = np.array(reopen)
-
-# get loss of generator/discriminator for each batch in each epoch
-# real_labels_rat = reopen[:,0]
-# real_labels_pmax = reopen[:,1]
-
-# fake_labels_rat = reopen[:,2]
-# fake_labels_pmax = reopen[:,3]
-
-# n_batches = len(real_labels_rat)
-# n_epochs = int(n_batches/BATCH_NUMBER)
-
-# real_labels_rat_batchmean = [np.mean(real_labels_rat[k*BATCH_NUMBER:(k+1)*BATCH_NUMBER]) for k in range(n_epochs)]
-# real_labels_pmax_batchmean = [np.mean(real_labels_pmax[k*BATCH_NUMBER:(k+1)*BATCH_NUMBER]) for k in range(n_epochs)]
-
-# fake_labels_rat_batchmean = [np.mean(fake_labels_rat[k*BATCH_NUMBER:(k+1)*BATCH_NUMBER]) for k in range(n_epochs)]
-# fake_labels_pmax_batchmean = [np.mean(fake_labels_pmax[k*BATCH_NUMBER:(k+1)*BATCH_NUMBER]) for k in range(n_epochs)]
-
-# real_labels_rat = reopen[:,0]
-
-# fake_labels_rat = reopen[:,1]
-
-# n_batches = len(real_labels_rat)
-# n_epochs = int(n_batches/BATCH_NUMBER)
-
-# real_labels_rat_batchmean = [np.mean(real_labels_rat[k*BATCH_NUMBER:(k+1)*BATCH_NUMBER]) for k in range(n_epochs)]
-# fake_labels_rat_batchmean = [np.mean(fake_labels_rat[k*BATCH_NUMBER:(k+1)*BATCH_NUMBER]) for k in range(n_epochs)]
-
-# # Plot them
-# allax = np.arange(1,n_batches+1)
-# meanax = np.linspace(234,n_batches,n_epochs)
-# axlabels = np.linspace(5,n_epochs,n_epochs//5, dtype = 'int32')
-
-# plt.figure(figsize = (8,5))
-# plt.plot(allax, real_labels_rat, label = 'Real Labels')#, alpha = 0.4)
-# plt.plot(allax, fake_labels_rat, label = 'Fake Labels')#, alpha = 0.4)
-# # plt.plot(meanax, real_labels_rat_batchmean, c = 'tab:blue', label = 'Real Labels')
-# # plt.plot(meanax, fake_labels_rat_batchmean, c = 'tab:orange', label = 'Fake Labels')
-# plt.legend()
-# #plt.xticks(axlabels*234, labels = axlabels)
-# plt.xlabel('Epoch No.')
-# plt.ylabel('Accuracy')
-
-# plt.savefig(os.path.join(log_dir, picstring1), bbox_inches = 'tight')
-
-# plt.figure(figsize = (8,5))
-# plt.plot(allax, real_labels_pmax, alpha = 0.4)
-# plt.plot(allax, fake_labels_pmax, alpha = 0.4)
-# plt.plot(meanax, real_labels_pmax_batchmean, c = 'tab:blue', label = 'Real Labels')
-# plt.plot(meanax, fake_labels_pmax_batchmean, c = 'tab:orange', label = 'Fake Labels')
-# plt.legend()
-# plt.xticks(axlabels*234, labels = axlabels)
-# plt.xlabel('Epoch No.')
-# plt.ylabel('Highest probability of single label')
-
-# plt.savefig(os.path.join(log_dir, picstring2), bbox_inches = 'tight')
-
-#%%
-# kind = 'trainloss'
-# filestring = kind + '_log.txt'
-# picstring = kind + '_plot.png'
-
-# with open(os.path.join(log_dir, filestring), 'r') as f:
-#     reopen = []
-#     f.readline() # skip header line
-#     for line in f:
-#         reopen.append([float(i) for i in line.split(',')[2:4]])
-
-#         # Falls man mal nicht weiß wie viele Headerlines es sind. Sind dann aber leeren Listen an den Headerpositionen,
-#         # da gibts sicher einen netten workaround
-#         # try:
-#         #     b.append([float(i) for i in line.split(',')[2:]])
-#         # except:
-#         #     continue
-    
-# reopen = np.array(reopen)
-
-# # get loss of generator/discriminator for each batch in each epoch
-# g_loss = reopen[:,0]
-# d_loss = reopen[:,1]
-
-# n_batches = len(g_loss)
-# n_epochs = int(n_batches/BATCH_NUMBER)
-
-# g_loss_batchmean = [np.mean(g_loss[k*BATCH_NUMBER:(k+1)*BATCH_NUMBER]) for k in range(n_epochs)]
-# d_loss_batchmean = [np.mean(d_loss[k*BATCH_NUMBER:(k+1)*BATCH_NUMBER]) for k in range(n_epochs)]
-
-# # Plot them
-# allax = np.arange(1,n_batches+1)
-# meanax = np.linspace(234,n_batches,n_epochs)
-# axlabels = np.linspace(5,n_epochs,n_epochs//5, dtype = 'int32')
-
-# plt.figure(figsize = (8,5))
-# plt.plot(allax, g_loss, alpha = 0.4)
-# plt.plot(allax, d_loss, alpha = 0.4)
-# plt.plot(meanax, g_loss_batchmean, c = 'tab:blue', label = 'Generator')
-# plt.plot(meanax, d_loss_batchmean, c = 'tab:orange', label = 'Discriminator')
-# plt.legend()
-# plt.xticks(axlabels*234, labels = axlabels)
-# plt.xlabel('Epoch No.')
-# plt.ylabel('Total loss')
-
-# plt.savefig(os.path.join(log_dir, picstring), bbox_inches = 'tight')
-#%%
-# kind = 'valloss'
-# filestring = kind + '_log.txt'
-# picstring1 = kind + '_plot_Loss.png'
-# picstring2 = kind + '_plot_Accuracy.png'
-
-# with open(os.path.join(log_dir, filestring), 'r') as f:
-#     reopen = []
-#     f.readline() # skip header line
-#     for line in f:
-#         reopen.append([float(i) for i in line.split(',')[1:]])
-
-#         # Falls man mal nicht weiß wie viele Headerlines es sind. Sind dann aber leeren Listen an den Headerpositionen,
-#         # da gibts sicher einen netten workaround
-#         # try:
-#         #     b.append([float(i) for i in line.split(',')[2:]])
-#         # except:
-#         #     continue
-    
-# reopen = np.array(reopen)
-
-# # get loss of generator/discriminator for each batch in each epoch
-# label_loss = reopen[:,0]
-# label_accuracy = reopen[:,1]
-
-# bool_loss = reopen[:,2]
-# bool_accuracy = reopen[:,3]
-
-# n_batches = len(label_loss)
-# n_epochs = int(n_batches/BATCH_NUMBER)
-
-# # label_loss_batchmean = [np.mean(label_loss[k*BATCH_NUMBER:(k+1)*BATCH_NUMBER]) for k in range(n_epochs)]
-# # label_accuracy_batchmean = [np.mean(label_accuracy[k*BATCH_NUMBER:(k+1)*BATCH_NUMBER]) for k in range(n_epochs)]
-
-# # bool_loss_batchmean = [np.mean(bool_loss[k*BATCH_NUMBER:(k+1)*BATCH_NUMBER]) for k in range(n_epochs)]
-# # bool_accuracy_batchmean = [np.mean(bool_accuracy[k*BATCH_NUMBER:(k+1)*BATCH_NUMBER]) for k in range(n_epochs)]
-
-# # Plot them
-# allax = np.arange(1,n_batches+1)
-# meanax = np.linspace(234,n_batches,n_epochs)
-# axlabels = np.linspace(5,n_epochs,n_epochs//5, dtype = 'int32')
-
-# plt.figure(figsize = (8,5))
-# plt.plot(allax, label_loss, label = 'Labels')#, alpha = 0.4)
-# plt.plot(allax, bool_loss, label = 'Bools')#, alpha = 0.4)
-# # plt.plot(meanax, label_loss_batchmean, c = 'tab:blue', label = 'Labels')
-# # plt.plot(meanax, bool_loss_batchmean, c = 'tab:orange', label = 'Bools')
-# plt.legend()
-# #plt.xticks(axlabels*234, labels = axlabels)
-# plt.xlabel('Epoch No.')
-# plt.ylabel('Loss')
-
-# plt.savefig(os.path.join(log_dir, picstring1), bbox_inches = 'tight')
-
-# plt.figure(figsize = (8,5))
-# plt.plot(allax, label_accuracy, label = 'Labels')#, alpha = 0.4)
-# plt.plot(allax, bool_accuracy, label = 'Bools')#, alpha = 0.4)
-# # plt.plot(meanax, label_accuracy_batchmean, c = 'tab:blue', label = 'Labels')
-# # plt.plot(meanax, bool_accuracy_batchmean, c = 'tab:orange', label = 'Bools')
-# plt.legend()
-# #plt.xticks(axlabels*234, labels = axlabels)
-# plt.xlabel('Epoch No.')
-# plt.ylabel('Accuracy')
-
-# plt.savefig(os.path.join(log_dir, picstring2), bbox_inches = 'tight')
-#%%
-# '''
-# Von jedem Batch wird die cross_entropy ausgerechnet und mit einem Faktor je nach Performance multipliziert.
-# Hat nicht die gewünschten Ergebnisse gebracht.
-# '''
-# def train_step_labels(images, real_labels, noise, fake_labels, epoch, batch_counter, thresh_prob = 0.7, thresh_quant = 0.2):
-    
-#     with tf.GradientTape() as gen_tape, tf.GradientTape() as disc_tape:
-#         generated_images = generator(noise, training=True)
-        
-#         real_output = discriminator(images, training=True)
-#         fake_output = discriminator(generated_images, training=True)
-        
-#         real_labels_pred = real_output[:,:-1]
-#         fake_labels_pred = fake_output[:,:-1]
+# noise = seed
+# images = train_dataset[0]
+# epoch = 0
+# batch_counter = 1
+# fake_labels = seed_labels
             
-#         # real_classes_true = np.argmax(real_labels_true, axis = 1)
-#         # real_classes_pred = np.argmax(real_labels_pred, axis = 1)
+# real_labels = to_categorical(train_labels[0], num_classes=10)
 
-#         real_loss = cross_entropy(y_true = real_labels, y_pred = real_labels_pred)
-#         real_p_corrlabel = (np.argmax(real_labels, axis = 1) == np.argmax(real_labels_pred, axis = 1)).sum()/BATCH_SIZE
-#         real_p_highprob = (np.max(real_labels_pred, axis = 1)>thresh_prob).sum()/BATCH_SIZE
-#         real_loss *= 2-np.mean([real_p_corrlabel, real_p_highprob])
-           
-        
-#         fake_loss = cross_entropy(y_true = fake_labels, y_pred = fake_labels_pred)
-#         fake_p_corrlabel = (np.argmax(fake_labels, axis = 1) == np.argmax(fake_labels_pred, axis = 1)).sum()/BATCH_SIZE
-#         fake_p_highprob = (np.max(fake_labels_pred, axis = 1)>thresh_prob).sum()/BATCH_SIZE
-#         fake_loss *= 2-np.mean([fake_p_corrlabel, fake_p_highprob])
-               
-#         disc_loss = real_loss + fake_loss
-#         gen_loss = fake_loss
-                
-#     gradients_of_generator = gen_tape.gradient(gen_loss, generator.trainable_variables)
-#     generator_optimizer.apply_gradients(zip(gradients_of_generator, generator.trainable_variables))
+# thresh_quant = 0.7
+# thresh_prob = 0.2
+
+
+
+# a = tf.reduce_sum(tf.cast(tf.math.equal(tf.math.argmax(real_labels, axis = 1), tf.math.argmax(real_labels, axis = 1)), tf.int8))/BATCH_SIZE > thresh_quant and tf.math.reduce_max(real_labels) > thresh_prob
+
+# #a = tf.constant(True)
+# b = tf.cond(a, true_fn = lambda:cross_entropy(real_labels, real_labels+1), false_fn =  lambda:2*cross_entropy(real_labels, real_labels+1))
+
+# start1 = time.time()
+# with tf.GradientTape() as gen_tape, tf.GradientTape() as disc_tape:
+#     generated_images = generator(noise, training=True)
     
-#     gradients_of_discriminator = disc_tape.gradient(disc_loss, discriminator.trainable_variables)
-#     discriminator_optimizer.apply_gradients(zip(gradients_of_discriminator, discriminator.trainable_variables))
+#     real_output = discriminator(images, training=True)
+#     fake_output = discriminator(generated_images, training=True)
+    
+#     real_labels_pred = real_output[:,:-1]
+#     fake_labels_pred = fake_output[:,:-1]
         
-#     log_file_misc.write(str(epoch) + ',' + str(batch_counter) + ',' + 
-#                         str(real_p_corrlabel) + ',' + str(real_p_highprob) + ',' + 
-#                         str(fake_p_corrlabel) + ',' + str(fake_p_highprob) + '\n')
+#     # real_classes_true = np.argmax(real_labels_true, axis = 1)
+#     # real_classes_pred = np.argmax(real_labels_pred, axis = 1)
+    
+#     # log_file_misc.write(str(epoch) + ',' + str(batch_counter) + ',' + 
+#     #                     str((np.argmax(real_labels, axis = 1) == np.argmax(real_labels_pred, axis = 1)).sum()/BATCH_SIZE) + ',' + str(np.max(real_labels_pred)) + ',' + 
+#     #                     str((np.argmax(fake_labels, axis = 1) == np.argmax(fake_labels_pred, axis = 1)).sum()/BATCH_SIZE) + ',' + str(np.max(fake_labels_pred)) + '\n')
+
+#     # Real Input data
+    
+#     if (np.argmax(real_labels, axis = 1) == np.argmax(real_labels_pred, axis = 1)).sum()/BATCH_SIZE > thresh_quant and tf.math.reduce_max(real_labels_pred) > thresh_prob:
+#         real_loss = cross_entropy(y_true = real_labels, y_pred = real_labels_pred)
+#     else:
+#         real_loss = 2*cross_entropy(y_true = real_labels, y_pred = real_labels_pred)
+    
+#     # Fake Input data
+#     if (np.argmax(fake_labels, axis = 1) == np.argmax(fake_labels_pred, axis = 1)).sum()/BATCH_SIZE > thresh_quant and tf.math.reduce_max(fake_labels_pred) > thresh_prob:
+#         fake_loss = cross_entropy(y_true = fake_labels, y_pred = fake_labels_pred)
+#     else:
+#         fake_loss = 2*cross_entropy(y_true = fake_labels, y_pred = fake_labels_pred)
+
+#     disc_loss = real_loss + fake_loss
+#     gen_loss = fake_loss
+
+# gradients_of_generator = gen_tape.gradient(gen_loss, generator.trainable_variables)
+# generator_optimizer.apply_gradients(zip(gradients_of_generator, generator.trainable_variables))
+        
+# gradients_of_discriminator = disc_tape.gradient(disc_loss, discriminator.trainable_variables)
+# discriminator_optimizer.apply_gradients(zip(gradients_of_discriminator, discriminator.trainable_variables))
+
+# print(time.time()-start1)
 
 
-#     return gen_loss, disc_loss
+#%%
+
+'''
+train_step_labels mit tf.math. Funktionen
+'''
+# Real Input data
+        
+# real_cond = tf.reduce_sum(tf.cast(tf.math.equal(tf.math.argmax(real_labels, axis = 1), tf.math.argmax(real_labels_pred, axis = 1)), tf.int8))/BATCH_SIZE > thresh_quant and tf.math.reduce_max(real_labels_pred) > thresh_prob
+# real_loss = tf.cond(real_cond, true_fn = lambda:cross_entropy(y_true = real_labels, y_pred = real_labels_pred), false_fn =  lambda:2*cross_entropy(y_true = real_labels, y_pred = real_labels_pred))
+
+# fake_cond = tf.reduce_sum(tf.cast(tf.math.equal(tf.math.argmax(fake_labels, axis = 1), tf.math.argmax(fake_labels_pred, axis = 1)), tf.int8))/BATCH_SIZE > thresh_quant and tf.math.reduce_max(fake_labels_pred) > thresh_prob
+# fake_loss = tf.cond(fake_cond, true_fn = lambda:cross_entropy(y_true = fake_labels, y_pred = fake_labels_pred), false_fn =  lambda:2*cross_entropy(y_true = fake_labels, y_pred = fake_labels_pred))
+
+# if tf.reduce_sum(tf.cast(tf.math.equal(tf.math.argmax(real_labels, axis = 1), tf.math.argmax(real_labels_pred, axis = 1)), tf.int8))/BATCH_SIZE > thresh_quant and tf.math.reduce_max(real_labels_pred) > thresh_prob:
+#     real_loss = cross_entropy(y_true = real_labels, y_pred = real_labels_pred)
+# else:
+#     real_loss = 2*cross_entropy(y_true = real_labels, y_pred = real_labels_pred)
+
+# # Fake Input data
+# if tf.reduce_sum(tf.cast(tf.math.equal(tf.math.argmax(fake_labels, axis = 1), tf.math.argmax(fake_labels_pred, axis = 1)), tf.int8))/BATCH_SIZE > thresh_quant and tf.math.reduce_max(fake_labels_pred) > thresh_prob:
+#     fake_loss = cross_entropy(y_true = fake_labels, y_pred = fake_labels_pred)
+# else:
+#     fake_loss = 2*cross_entropy(y_true = fake_labels, y_pred = fake_labels_pred)
 
 
+#%%
